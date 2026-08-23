@@ -10,6 +10,7 @@ import csv
 import ctypes
 import json
 import os
+import subprocess
 import sys
 import tkinter as tk
 from dataclasses import dataclass
@@ -59,7 +60,7 @@ class HourlyReminder:
         self.period_started_at: datetime | None = None
 
         self.root.title(APP_NAME)
-        self.root.geometry("480x290")
+        self.root.geometry("480x330")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
         self._build_main_window()
@@ -80,11 +81,16 @@ class HourlyReminder:
         self.stop_button.pack(side="left", padx=(10, 0))
         self.manual_button = tk.Button(frame, text="立即填写", command=self._show_prompt, width=14, state="disabled")
         self.manual_button.pack(anchor="w", pady=(10, 0))
+        self.autostart_var = tk.BooleanVar(value=self._startup_shortcut().exists())
+        tk.Checkbutton(
+            frame, text="开机自动启动", variable=self.autostart_var,
+            command=self._toggle_autostart, font=("Microsoft YaHei UI", 10),
+        ).pack(anchor="w", pady=(12, 0))
         tk.Label(
             frame,
             text=f"记录文件：{LOG_FILE}",
             fg="#666666",
-            font=("Microsoft YaHei UI", 9),
+            font=("Microsoft YaHei UI", 9), justify="left", wraplength=425,
         ).pack(anchor="w", pady=(18, 0))
 
     def _tick(self) -> None:
@@ -117,12 +123,43 @@ class HourlyReminder:
             return
         self._show_prompt(is_clock_out=True)
 
+    @staticmethod
+    def _startup_shortcut() -> Path:
+        return Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / f"{APP_NAME}.lnk"
+
+    def _toggle_autostart(self) -> None:
+        shortcut = self._startup_shortcut()
+        if not self.autostart_var.get():
+            try:
+                shortcut.unlink(missing_ok=True)
+            except OSError as error:
+                self.autostart_var.set(True)
+                messagebox.showerror(APP_NAME, f"无法取消开机启动：\n{error}", parent=self.root)
+            return
+        target = Path(sys.executable)
+        arguments = "" if getattr(sys, "frozen", False) else f'"{Path(__file__).resolve()}"'
+        command = (
+            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($args[0]);"
+            "$s.TargetPath=$args[1];$s.Arguments=$args[2];$s.WorkingDirectory=$args[3];"
+            "$s.IconLocation=$args[4]+',0';$s.Save()"
+        )
+        try:
+            subprocess.run(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command,
+                 str(shortcut), str(target), arguments, str(target.parent), str(target)],
+                check=True, creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            self.autostart_var.set(False)
+            messagebox.showerror(APP_NAME, f"无法启用开机启动：\n{error}", parent=self.root)
+
     def _show_prompt(self, is_clock_out: bool = False) -> None:
         if self.prompt is not None:
             self._bring_to_front()
             return
 
         opened_at = datetime.now()
+        period_started_at = self.period_started_at or opened_at
         window = tk.Toplevel(self.root)
         window.title("下班前填写" if is_clock_out else "请记录刚刚这一小时")
         window.configure(bg="#f7f7f7")
@@ -142,6 +179,14 @@ class HourlyReminder:
             bg="#f7f7f7",
             font=("Microsoft YaHei UI", 19, "bold"),
         ).pack(anchor="w")
+        tk.Label(
+            body,
+            text=(
+                f"本次填写时间段：{period_started_at.strftime('%Y-%m-%d %H:%M')} "
+                f"至 {opened_at.strftime('%Y-%m-%d %H:%M')}"
+            ),
+            bg="#f7f7f7", fg="#444444", font=("Microsoft YaHei UI", 10),
+        ).pack(anchor="w", pady=(8, 0))
         elapsed = tk.Label(body, bg="#f7f7f7", fg="#b42318", font=("Microsoft YaHei UI", 10))
         elapsed.pack(anchor="w", pady=(8, 18))
         text = tk.Text(body, height=10, font=("Microsoft YaHei UI", 12), wrap="word", undo=True)
@@ -154,7 +199,7 @@ class HourlyReminder:
         ).pack(anchor="e", pady=(18, 0))
 
         self.prompt = Prompt(
-            self.period_started_at or opened_at, opened_at, window, text, elapsed, is_clock_out,
+            period_started_at, opened_at, window, text, elapsed, is_clock_out,
         )
         self.status.config(text="正在等待下班记录；保存后结束本次上班。" if is_clock_out else "正在等待填写；新的提醒已暂停。")
         self._make_window_prominent(window)
