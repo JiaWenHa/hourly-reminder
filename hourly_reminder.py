@@ -138,15 +138,22 @@ class HourlyReminder:
             return
         target = Path(sys.executable)
         arguments = "" if getattr(sys, "frozen", False) else f'"{Path(__file__).resolve()}"'
+        # PowerShell does not reliably expose arguments appended after -Command
+        # as $args on every Windows configuration.  Use literal, escaped paths.
+        def ps_literal(value: str) -> str:
+            return "'" + value.replace("'", "''") + "'"
+
+        target_text = ps_literal(str(target))
         command = (
-            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($args[0]);"
-            "$s.TargetPath=$args[1];$s.Arguments=$args[2];$s.WorkingDirectory=$args[3];"
-            "$s.IconLocation=$args[4]+',0';$s.Save()"
+            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut("
+            f"{ps_literal(str(shortcut))});"
+            f"$s.TargetPath={target_text};$s.Arguments={ps_literal(arguments)};"
+            f"$s.WorkingDirectory={ps_literal(str(target.parent))};"
+            f"$s.IconLocation={target_text}+',0';$s.Save()"
         )
         try:
             subprocess.run(
-                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command,
-                 str(shortcut), str(target), arguments, str(target.parent), str(target)],
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
                 check=True, creationflags=subprocess.CREATE_NO_WINDOW,
             )
         except (OSError, subprocess.SubprocessError) as error:
@@ -167,7 +174,6 @@ class HourlyReminder:
         # input: the text field must remain usable and Windows controls stay safe.
         window.attributes("-fullscreen", True)
         window.attributes("-topmost", True)
-        window.transient(self.root)
         window.protocol("WM_DELETE_WINDOW", self._refuse_close)
         window.bind("<Alt-F4>", lambda _event: "break")
 
@@ -203,6 +209,8 @@ class HourlyReminder:
         )
         self.status.config(text="正在等待下班记录；保存后结束本次上班。" if is_clock_out else "正在等待填写；新的提醒已暂停。")
         self._make_window_prominent(window)
+        # A minimized/behind main window must not keep the reminder hidden.
+        window.after(80, lambda: self._make_window_prominent(window))
         self._update_elapsed()
 
     def _update_elapsed(self) -> None:
@@ -264,12 +272,23 @@ class HourlyReminder:
 
     @staticmethod
     def _make_window_prominent(window: tk.Toplevel) -> None:
-        # Keep it above normal Windows.  Tk's topmost flag is sufficient in most cases;
-        # this explicit Windows call makes the intent more reliable on Windows 11.
+        """Restore and show a reminder even if the app was in the background."""
         try:
             HWND_TOPMOST = -1
-            SWP_NOMOVE, SWP_NOSIZE = 0x0002, 0x0001
-            ctypes.windll.user32.SetWindowPos(window.winfo_id(), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+            SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW = 0x0002, 0x0001, 0x0040
+            SW_RESTORE = 9
+            window.deiconify()
+            window.lift()
+            window.update_idletasks()
+            hwnd = window.winfo_id()
+            user32 = ctypes.windll.user32
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            user32.SetWindowPos(
+                hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            )
+            user32.SetForegroundWindow(hwnd)
+            window.focus_force()
         except (AttributeError, OSError):
             pass
 
@@ -306,3 +325,4 @@ if __name__ == "__main__":
     app = tk.Tk()
     HourlyReminder(app, get_interval_seconds())
     app.mainloop()
+
