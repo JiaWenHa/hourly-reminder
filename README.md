@@ -1,29 +1,87 @@
-# 每小时记录（Windows 11）
+# Work Log (Windows 11)
 
-一个零依赖的 Windows 桌面提醒程序。启动后默认“已下班”；点击“开始上班”才会启动每小时提醒。点击“开始下班”会先要求填写从上次记录到下班时的工作内容，保存后才暂停后续提醒。保存前弹窗会持续显示等待时间，并暂停之后所有提醒。安装时可选择记录目录，每条记录会按提交时间追加到该目录的 `activity_log.csv`。
+[English](#english) | [中文](#中文)
 
-## 运行
+## 中文
 
-1. 直接双击 `dist\HourlyReminderSetup.exe`，完成安装。
-2. 安装后从开始菜单打开“每小时记录”。
+Work Log 是一个 Windows 11 桌面工作记录与提醒工具。开始上班后，它会按设定时间提醒你记录工作内容，并在下班时要求完成最后一段工作记录。
 
-安装包已内置 Python 运行时，目标电脑无需安装 Python。
+### 安装与运行
 
-如需从源码调试，确认已安装 Python 3 后，运行：
+1. 双击 [dist\WorkLogSetup.exe](dist/WorkLogSetup.exe)。
+2. 安装时选择活动记录保存位置；默认会联网下载中国大陆当年与下一年的法定节假日、调休工作日日历。
+3. 安装完成后，从开始菜单打开 **Work Log**。
 
-   ```powershell
-   python hourly_reminder.py
-   ```
+安装包内置 Python 运行环境，目标电脑不需要另行安装 Python。
 
-源码没有额外依赖。测试时可以传入秒数，例如 `python hourly_reminder.py 10`，每 10 秒提醒一次。
+### 功能
 
-## 行为说明
+- 点击“开始上班”后，每小时全屏提醒填写这段时间做了什么。
+- 可用滚动框设定上班、下班时间；到点后全屏询问是否开始上班或下班。
+- 支持“每天”或“仅法定工作日”计划。后者使用安装时保存的中国大陆节假日、调休日历；未下载日历时不可用。
+- 选择下班后，必须填写从上次记录到下班这段时间的内容，保存后才会结束当天提醒。
+- 全屏提示会显示应填写的时间段和等待时长；未填写时不会创建新的后续提醒。
+- 可在主界面启用“开机自动启动”。
+- 记录按时间顺序追加到所选目录的 `activity_log.csv`，重新安装或重启不会覆盖已有记录。
 
-- 弹窗会全屏显示并始终置顶，打开后会显示本次应填写的时间段，且输入焦点位于文本框；按“保存记录”且内容非空后才会关闭。它不会全局拦截键盘鼠标，以确保能够正常填写。
-- 当已有未提交弹窗时，不再创建后续弹窗；窗口会显示已等待的时长。
-- Windows 不应被普通提醒软件全局锁定；系统安全界面、任务管理器和其他应用始终保持可用。
-- 关闭主窗口只会在没有待填写提醒时生效。
+### 安全说明
 
-## 开机启动（可选）
+提示窗口会置顶和全屏显示，但不会全局拦截键盘鼠标。Windows 安全界面、任务管理器及其他系统控制始终可用。
 
-在主界面勾选“开机自动启动”即可；取消勾选会移除该设置。
+### 从源码测试
+
+确认已安装 Python 3 后，在项目目录运行：
+
+```powershell
+python hourly_reminder.py
+```
+
+可传入秒数来缩短每小时提醒间隔，例如每 10 秒提醒一次：
+
+```powershell
+python hourly_reminder.py 10
+```
+
+---
+
+<a id="english"></a>
+
+## English
+
+Work Log is a Windows 11 desktop work-log and reminder app. Once a work session starts, it prompts you to record your activity at scheduled intervals and requires a final entry when you finish work.
+
+### Install and run
+
+1. Run [dist\WorkLogSetup.exe](dist/WorkLogSetup.exe).
+2. Choose where to store activity records. By default, the installer downloads and saves the current and next year's Mainland China public-holiday and make-up-workday calendar.
+3. Open **Work Log** from the Start menu after installation.
+
+The installer bundles its Python runtime, so the target computer does not need Python installed.
+
+### Features
+
+- After selecting **Start Work**, receive a full-screen prompt every hour to record what you did.
+- Set start and end times with hour/minute spin controls; full-screen confirmation appears at each scheduled time.
+- Choose **Every day** or **Legal workdays only**. The latter uses the Mainland China holiday and make-up-workday calendar saved during installation, and is unavailable when that calendar was not downloaded.
+- Choosing to finish work requires a final activity entry covering the period since the previous record.
+- Prompts show the requested time range and how long they have been waiting. An unanswered prompt prevents later reminders from being created.
+- Enable or disable launch at Windows sign-in from the main window.
+- Entries are appended in chronological order to `activity_log.csv` in the selected folder. Reinstalling or restarting does not overwrite existing records.
+
+### Safety
+
+Prompts are full-screen and topmost, but they do not globally capture the keyboard or mouse. Windows security controls, Task Manager, and other system controls remain available.
+
+### Run from source
+
+With Python 3 installed, run the following in the project directory:
+
+```powershell
+python hourly_reminder.py
+```
+
+For a short test interval, pass a number of seconds. For example, this prompts every 10 seconds:
+
+```powershell
+python hourly_reminder.py 10
+```
