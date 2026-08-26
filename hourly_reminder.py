@@ -16,24 +16,37 @@ import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import messagebox, ttk
+
+from holiday_calendar import is_china_legal_workday
 
 
-APP_NAME = "每小时记录"
+APP_NAME = "Work Log"
 DEFAULT_INTERVAL_SECONDS = 60 * 60
+# Keep the original directory so upgrading never loses existing records/settings.
 APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "HourlyReminder"
 SETTINGS_FILE = APP_DATA_DIR / "settings.json"
 
 
+def load_settings() -> dict[str, object]:
+    try:
+        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_settings(settings: dict[str, object]) -> None:
+    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(
+        json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+
+
 def get_log_file() -> Path:
     """Use the folder selected during installation, with a safe default."""
-    try:
-        settings = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-        selected_directory = settings.get("log_directory")
-        if selected_directory:
-            return Path(selected_directory) / "activity_log.csv"
-    except (OSError, json.JSONDecodeError):
-        pass
+    selected_directory = load_settings().get("log_directory")
+    if isinstance(selected_directory, str) and selected_directory:
+        return Path(selected_directory) / "activity_log.csv"
     return APP_DATA_DIR / "activity_log.csv"
 
 
@@ -58,9 +71,24 @@ class HourlyReminder:
         self.working = False
         self.next_due: datetime | None = None
         self.period_started_at: datetime | None = None
+        settings = load_settings()
+        start_hour, start_minute = self._split_time(settings.get("start_time", "09:00"), "09:00")
+        end_hour, end_minute = self._split_time(settings.get("end_time", "18:00"), "18:00")
+        self.start_hour_var = tk.StringVar(value=start_hour)
+        self.start_minute_var = tk.StringVar(value=start_minute)
+        self.end_hour_var = tk.StringVar(value=end_hour)
+        self.end_minute_var = tk.StringVar(value=end_minute)
+        mode = settings.get("schedule_mode", "daily")
+        self.schedule_mode_var = tk.StringVar(value=mode if mode in {"daily", "legal_workdays"} else "daily")
+        stored_calendar = settings.get("holiday_calendar", {})
+        self.holiday_calendar: dict[str, dict[str, bool]] = stored_calendar if isinstance(stored_calendar, dict) else {}
+        self.decision_window: tk.Toplevel | None = None
+        self.decision_opened_at: datetime | None = None
+        self.start_prompted_date: str | None = None
+        self.end_prompted_date: str | None = None
 
         self.root.title(APP_NAME)
-        self.root.geometry("480x330")
+        self.root.geometry("480x495")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
         self._build_main_window()
@@ -70,7 +98,7 @@ class HourlyReminder:
     def _build_main_window(self) -> None:
         frame = tk.Frame(self.root, padx=26, pady=24)
         frame.pack(fill="both", expand=True)
-        tk.Label(frame, text="每小时记录", font=("Microsoft YaHei UI", 20, "bold")).pack(anchor="w")
+        tk.Label(frame, text="Work Log", font=("Microsoft YaHei UI", 20, "bold")).pack(anchor="w")
         self.status = tk.Label(frame, font=("Microsoft YaHei UI", 11), justify="left")
         self.status.pack(anchor="w", pady=(15, 20))
         buttons = tk.Frame(frame)
@@ -86,6 +114,26 @@ class HourlyReminder:
             frame, text="开机自动启动", variable=self.autostart_var,
             command=self._toggle_autostart, font=("Microsoft YaHei UI", 10),
         ).pack(anchor="w", pady=(12, 0))
+        schedule = tk.LabelFrame(frame, text="上下班时间（24 小时制）", padx=10, pady=8)
+        schedule.pack(fill="x", pady=(12, 0))
+        hours = tuple(f"{value:02d}" for value in range(24))
+        minutes = tuple(f"{value:02d}" for value in range(60))
+
+        def time_picker(row: int, label: str, hour: tk.StringVar, minute: tk.StringVar) -> None:
+            tk.Label(schedule, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            ttk.Spinbox(schedule, values=hours, textvariable=hour, width=3, state="readonly", wrap=True).grid(row=row, column=1, padx=(8, 2))
+            tk.Label(schedule, text=":").grid(row=row, column=2)
+            ttk.Spinbox(schedule, values=minutes, textvariable=minute, width=3, state="readonly", wrap=True).grid(row=row, column=3, padx=(2, 18))
+
+        time_picker(0, "上班", self.start_hour_var, self.start_minute_var)
+        time_picker(1, "下班", self.end_hour_var, self.end_minute_var)
+        tk.Radiobutton(schedule, text="每天", variable=self.schedule_mode_var, value="daily").grid(row=0, column=4, sticky="w")
+        tk.Radiobutton(schedule, text="仅法定工作日", variable=self.schedule_mode_var, value="legal_workdays").grid(row=1, column=4, sticky="w")
+        tk.Button(schedule, text="保存时间", command=self._save_schedule).grid(row=0, column=5, rowspan=2, padx=(12, 0))
+        tk.Label(
+            schedule, text=self._holiday_calendar_status(),
+            fg="#666666", font=("Microsoft YaHei UI", 8),
+        ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(6, 0))
         tk.Label(
             frame,
             text=f"记录文件：{LOG_FILE}",
@@ -95,6 +143,7 @@ class HourlyReminder:
 
     def _tick(self) -> None:
         now = datetime.now()
+        self._check_work_schedule(now)
         # An unanswered prompt deliberately blocks all later scheduled prompts.
         if self.working and self.prompt is None and self.next_due is not None and now >= self.next_due:
             self._show_prompt()
@@ -106,6 +155,129 @@ class HourlyReminder:
             else:
                 self.status.config(text="当前状态：已下班\n点击“开始上班”后启动每小时提醒。")
         self.root.after(1000, self._tick)
+
+    @staticmethod
+    def _parse_time(value: str) -> datetime.time | None:
+        try:
+            return datetime.strptime(value.strip(), "%H:%M").time()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _split_time(value: str, fallback: str) -> tuple[str, str]:
+        parsed = HourlyReminder._parse_time(value)
+        if parsed is None:
+            parsed = datetime.strptime(fallback, "%H:%M").time()
+        return f"{parsed.hour:02d}", f"{parsed.minute:02d}"
+
+    def _selected_time(self, hour: tk.StringVar, minute: tk.StringVar) -> str:
+        return f"{hour.get()}:{minute.get()}"
+
+    def _save_schedule(self) -> None:
+        start_text = self._selected_time(self.start_hour_var, self.start_minute_var)
+        end_text = self._selected_time(self.end_hour_var, self.end_minute_var)
+        start = self._parse_time(start_text)
+        end = self._parse_time(end_text)
+        if start is None or end is None or start >= end:
+            messagebox.showwarning(
+                APP_NAME, "请输入有效时间，例如 09:00 和 18:00；下班时间应晚于上班时间。",
+                parent=self.root,
+            )
+            return
+        settings = load_settings()
+        settings["start_time"] = start_text
+        settings["end_time"] = end_text
+        settings["schedule_mode"] = self.schedule_mode_var.get()
+        try:
+            save_settings(settings)
+        except OSError as error:
+            messagebox.showerror(APP_NAME, f"无法保存上下班时间：\n{error}", parent=self.root)
+            return
+        self.start_prompted_date = None
+        self.end_prompted_date = None
+        self.status.config(text=f"上下班时间已保存：{settings['start_time']} - {settings['end_time']}")
+
+    def _holiday_calendar_status(self) -> str:
+        years = sorted(year for year, days in self.holiday_calendar.items() if isinstance(days, dict))
+        if years:
+            return "法定节假日与调休日历已下载：" + "、".join(years)
+        return "尚未下载法定节假日日历；重新运行安装包并联网后可启用。"
+
+    def _check_work_schedule(self, now: datetime) -> None:
+        if self.prompt is not None or self.decision_window is not None:
+            return
+        if self.schedule_mode_var.get() == "legal_workdays":
+            legal_workday = is_china_legal_workday(now.date(), self.holiday_calendar)
+            if legal_workday is None:
+                return
+            if not legal_workday:
+                return
+        start_text = self._selected_time(self.start_hour_var, self.start_minute_var)
+        end_text = self._selected_time(self.end_hour_var, self.end_minute_var)
+        start = self._parse_time(start_text)
+        end = self._parse_time(end_text)
+        if start is None or end is None or start >= end:
+            return
+        today = now.date().isoformat()
+        if not self.working and now.time() >= start and self.start_prompted_date != today:
+            self.start_prompted_date = today
+            self._show_schedule_decision(is_start=True, scheduled_time=start_text)
+        elif self.working and now.time() >= end and self.end_prompted_date != today:
+            self.end_prompted_date = today
+            self._show_schedule_decision(is_start=False, scheduled_time=end_text)
+
+    def _show_schedule_decision(self, is_start: bool, scheduled_time: str) -> None:
+        window = tk.Toplevel(self.root)
+        self.decision_window = window
+        self.decision_opened_at = datetime.now()
+        window.title("上班确认" if is_start else "下班确认")
+        window.configure(bg="#f7f7f7")
+        window.attributes("-fullscreen", True)
+        window.attributes("-topmost", True)
+        window.protocol("WM_DELETE_WINDOW", lambda: None)
+        window.bind("<Alt-F4>", lambda _event: "break")
+        body = tk.Frame(window, bg="#f7f7f7", padx=50, pady=45)
+        body.pack(fill="both", expand=True)
+        action = "开始上班" if is_start else "开始下班"
+        tk.Label(body, text=f"现在是 {datetime.now().strftime('%H:%M')}", bg="#f7f7f7", font=("Microsoft YaHei UI", 15)).pack(anchor="w")
+        tk.Label(body, text=f"已到设定{action}时间（{scheduled_time}）", bg="#f7f7f7", font=("Microsoft YaHei UI", 24, "bold")).pack(anchor="w", pady=(14, 8))
+        tk.Label(body, text=f"是否{action}？", bg="#f7f7f7", font=("Microsoft YaHei UI", 17)).pack(anchor="w")
+        elapsed = tk.Label(body, bg="#f7f7f7", fg="#b42318", font=("Microsoft YaHei UI", 11))
+        elapsed.pack(anchor="w", pady=(12, 28))
+        buttons = tk.Frame(body, bg="#f7f7f7")
+        buttons.pack(anchor="w")
+
+        def choose_yes() -> None:
+            self._close_schedule_decision()
+            if is_start:
+                self._start_work()
+            else:
+                self._stop_work()
+
+        def choose_no() -> None:
+            self._close_schedule_decision()
+            self.status.config(text="已跳过本次" + action + "确认；仍可在主界面手动操作。")
+
+        tk.Button(buttons, text="是，" + action, command=choose_yes, bg="#1677ff", fg="white", width=16, pady=8).pack(side="left")
+        tk.Button(buttons, text="暂不" + action, command=choose_no, width=16, pady=8).pack(side="left", padx=(12, 0))
+
+        def update_waiting() -> None:
+            if self.decision_window is not window or self.decision_opened_at is None:
+                return
+            waited = int((datetime.now() - self.decision_opened_at).total_seconds())
+            minutes, seconds = divmod(waited, 60)
+            elapsed.config(text=f"等待选择：{minutes:02d}:{seconds:02d}")
+            window.after(1000, update_waiting)
+
+        self._make_window_prominent(window)
+        window.after(80, lambda: self._make_window_prominent(window))
+        update_waiting()
+
+    def _close_schedule_decision(self) -> None:
+        if self.decision_window is not None:
+            self.decision_window.destroy()
+        self.decision_window = None
+        self.decision_opened_at = None
 
     def _start_work(self) -> None:
         if self.working:
@@ -325,4 +497,3 @@ if __name__ == "__main__":
     app = tk.Tk()
     HourlyReminder(app, get_interval_seconds())
     app.mainloop()
-
