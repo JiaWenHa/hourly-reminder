@@ -135,8 +135,14 @@ def main() -> None:
                 status.configure(text="正在联网下载法定节假日日历…")
                 root.update_idletasks()
                 current_year = datetime.now().year
-                for year in (current_year, current_year + 1):
-                    holiday_calendar[str(year)] = download_china_holiday_year(year)
+                # The current year is required.  Some public services do not
+                # publish the following year's official schedule yet, which
+                # must not make a normal installation fail.
+                holiday_calendar[str(current_year)] = download_china_holiday_year(current_year)
+                try:
+                    holiday_calendar[str(current_year + 1)] = download_china_holiday_year(current_year + 1)
+                except (OSError, ValueError):
+                    pass
             except (OSError, ValueError) as error:
                 messagebox.showwarning(
                     "节假日日历下载失败",
@@ -204,3 +210,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
