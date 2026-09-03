@@ -23,6 +23,7 @@ from holiday_calendar import is_china_legal_workday
 
 APP_NAME = "Work Log"
 DEFAULT_INTERVAL_SECONDS = 60 * 60
+SCHEDULE_REMINDER_WINDOW = timedelta(minutes=30)
 # Keep the original directory so upgrading never loses existing records/settings.
 APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "HourlyReminder"
 SETTINGS_FILE = APP_DATA_DIR / "settings.json"
@@ -42,15 +43,18 @@ def save_settings(settings: dict[str, object]) -> None:
     )
 
 
-def get_log_file() -> Path:
+def get_log_directory() -> Path:
     """Use the folder selected during installation, with a safe default."""
     selected_directory = load_settings().get("log_directory")
     if isinstance(selected_directory, str) and selected_directory:
-        return Path(selected_directory) / "activity_log.csv"
-    return APP_DATA_DIR / "activity_log.csv"
+        return Path(selected_directory)
+    return APP_DATA_DIR
 
 
-LOG_FILE = get_log_file()
+def get_log_file(when: datetime | None = None) -> Path:
+    """Return this month's append-only log file; never replace old logs."""
+    timestamp = when or datetime.now()
+    return get_log_directory() / f"activity_log_{timestamp:%Y-%m}.csv"
 
 
 @dataclass
@@ -136,7 +140,10 @@ class HourlyReminder:
         ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(6, 0))
         tk.Label(
             frame,
-            text=f"记录文件：{LOG_FILE}",
+            text=(
+                f"本月记录文件：{get_log_file()}\n"
+                "旧版 activity_log.csv 会永久保留，不会在升级时删除。"
+            ),
             fg="#666666",
             font=("Microsoft YaHei UI", 9), justify="left", wraplength=425,
         ).pack(anchor="w", pady=(18, 0))
@@ -219,10 +226,24 @@ class HourlyReminder:
         if start is None or end is None or start >= end:
             return
         today = now.date().isoformat()
-        if not self.working and now.time() >= start and self.start_prompted_date != today:
+        scheduled_start = now.replace(
+            hour=start.hour, minute=start.minute, second=0, microsecond=0,
+        )
+        scheduled_end = now.replace(
+            hour=end.hour, minute=end.minute, second=0, microsecond=0,
+        )
+        in_start_window = (
+            scheduled_start - SCHEDULE_REMINDER_WINDOW <= now
+            <= scheduled_start + SCHEDULE_REMINDER_WINDOW
+        )
+        in_end_window = (
+            scheduled_end - SCHEDULE_REMINDER_WINDOW <= now
+            <= scheduled_end + SCHEDULE_REMINDER_WINDOW
+        )
+        if not self.working and in_start_window and self.start_prompted_date != today:
             self.start_prompted_date = today
             self._show_schedule_decision(is_start=True, scheduled_time=start_text)
-        elif self.working and now.time() >= end and self.end_prompted_date != today:
+        elif self.working and in_end_window and self.end_prompted_date != today:
             self.end_prompted_date = today
             self._show_schedule_decision(is_start=False, scheduled_time=end_text)
 
@@ -404,8 +425,10 @@ class HourlyReminder:
             self.prompt.text.focus_set()
             return
         now = datetime.now()
+        log_file = get_log_file(now)
         try:
-            with LOG_FILE.open("a", newline="", encoding="utf-8-sig") as file:
+            self._ensure_log_file(log_file)
+            with log_file.open("a", newline="", encoding="utf-8-sig") as file:
                 csv.writer(file).writerow([
                     self.prompt.period_started_at.isoformat(timespec="seconds"),
                     now.isoformat(timespec="seconds"),
@@ -430,10 +453,12 @@ class HourlyReminder:
             self.next_due = now + timedelta(seconds=self.interval_seconds)
             self.status.config(text="已保存，下一小时后再提醒。")
 
-    def _ensure_log_file(self) -> None:
-        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        if not LOG_FILE.exists():
-            with LOG_FILE.open("w", newline="", encoding="utf-8-sig") as file:
+    def _ensure_log_file(self, log_file: Path | None = None) -> None:
+        """Create only a missing monthly file; existing history is immutable."""
+        target = log_file or get_log_file()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            with target.open("w", newline="", encoding="utf-8-sig") as file:
                 csv.writer(file).writerow(["记录周期开始", "提交时间", "这段时间做的事情"])
 
     def _bring_to_front(self) -> None:

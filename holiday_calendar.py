@@ -46,4 +46,3 @@ def is_china_legal_workday(day: date, calendar: dict[str, dict[str, bool]]) -> b
     if exception is not None:
         return not bool(exception)
     return day.weekday() < 5
-

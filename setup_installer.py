@@ -55,15 +55,44 @@ def create_startup_shortcut(target: Path) -> None:
     create_shortcut(startup / f"{APP_NAME}.lnk", target)
 
 
+def read_existing_settings(settings_file: Path) -> dict[str, object]:
+    """Read upgrade settings without ever replacing an unreadable file."""
+    if not settings_file.exists():
+        return {}
+    try:
+        data = json.loads(settings_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"无法读取已有设置文件 {settings_file}：{error}") from error
+    if not isinstance(data, dict):
+        raise ValueError(f"已有设置文件格式无效：{settings_file}")
+    return data
+
+
 def main() -> None:
     root = tk.Tk()
     root.title("Work Log — 安装向导")
     root.resizable(False, False)
-    root.geometry("590x445")
+    root.geometry("590x465")
     app_dir = Path(os.environ["LOCALAPPDATA"]) / "HourlyReminder"
     target = app_dir / "WorkLog.exe"
     source = bundled_file("WorkLog.exe")
-    default_log_directory = app_dir
+    settings_file = app_dir / "settings.json"
+    try:
+        existing_settings = read_existing_settings(settings_file)
+    except ValueError as error:
+        messagebox.showerror(
+            "无法安全升级",
+            f"{error}\n\n为保护已有记录和设置，安装已停止，未修改任何文件。",
+            parent=root,
+        )
+        root.destroy()
+        return
+    configured_directory = existing_settings.get("log_directory")
+    default_log_directory = (
+        Path(configured_directory)
+        if isinstance(configured_directory, str) and configured_directory.strip()
+        else app_dir
+    )
     selected_directory = tk.StringVar(value=str(default_log_directory))
 
     container = ttk.Frame(root, padding=28)
@@ -111,7 +140,10 @@ def main() -> None:
     ttk.Button(directory_frame, text="浏览…", command=choose_directory).pack(side="left", padx=(10, 0))
     ttk.Label(
         container,
-        text="工作记录会按时间顺序写入此文件夹中的 activity_log.csv。",
+        text=(
+            "新记录会按月写入 activity_log_YYYY-MM.csv。"
+            "已有 activity_log.csv 和所有旧月记录均会保留，升级不会删除或覆盖。"
+        ),
         foreground="#555555",
     ).pack(anchor="w", pady=(0, 25))
 
@@ -167,11 +199,9 @@ def main() -> None:
             app_dir.mkdir(parents=True, exist_ok=True)
             log_directory.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
-            settings_file = app_dir / "settings.json"
-            try:
-                settings = json.loads(settings_file.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                settings = {}
+            # Merge with the settings read before installation.  This preserves
+            # all existing configuration and never touches any CSV log files.
+            settings = dict(existing_settings)
             settings["log_directory"] = str(log_directory)
             if holiday_calendar:
                 settings["holiday_calendar"] = holiday_calendar
@@ -197,7 +227,13 @@ def main() -> None:
             status.configure(text="")
             return
         subprocess.Popen([str(target)], cwd=app_dir)
-        messagebox.showinfo("安装完成", f"{APP_NAME} 已安装并启动。\n\n记录保存在：\n{log_directory / 'activity_log.csv'}", parent=root)
+        messagebox.showinfo(
+            "安装完成",
+            f"{APP_NAME} 已安装并启动。\n\n新记录按月保存在：\n"
+            f"{log_directory / 'activity_log_YYYY-MM.csv'}\n\n"
+            "已有记录已保留，未删除或覆盖。",
+            parent=root,
+        )
         root.destroy()
 
     install_button = ttk.Button(button_frame, text="立即安装", command=install)
@@ -210,4 +246,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

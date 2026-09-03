@@ -17,12 +17,12 @@ Work Log 是一个 Windows 11 桌面工作记录与提醒工具。开始上班�
 ### 功能
 
 - 点击“开始上班”后，每小时全屏提醒填写这段时间做了什么。
-- 可用滚动框设定上班、下班时间；到点后全屏询问是否开始上班或下班。
+- 可用滚动框设定上班、下班时间；仅在设定时间前后 30 分钟内全屏询问是否开始上班或下班。
 - 支持“每天”或“仅法定工作日”计划。后者使用安装时保存的中国大陆节假日、调休日历；未下载日历时不可用。
 - 选择下班后，必须填写从上次记录到下班这段时间的内容，保存后才会结束当天提醒。
 - 全屏提示会显示应填写的时间段和等待时长；未填写时不会创建新的后续提醒。
 - 可在主界面启用“开机自动启动”。
-- 记录按时间顺序追加到所选目录的 `activity_log.csv`，重新安装或重启不会覆盖已有记录。
+- 新记录按时间顺序追加到所选目录的 `activity_log_YYYY-MM.csv`。旧版 `activity_log.csv` 与所有历史月度记录都会保留；重新安装或升级不会删除或覆盖已有记录。
 
 ### 安全说明
 
@@ -61,12 +61,12 @@ The installer bundles its Python runtime, so the target computer does not need P
 ### Features
 
 - After selecting **Start Work**, receive a full-screen prompt every hour to record what you did.
-- Set start and end times with hour/minute spin controls; full-screen confirmation appears at each scheduled time.
+- Set start and end times with hour/minute spin controls; full-screen confirmation appears only within 30 minutes before or after each scheduled time.
 - Choose **Every day** or **Legal workdays only**. The latter uses the Mainland China holiday and make-up-workday calendar saved during installation, and is unavailable when that calendar was not downloaded.
 - Choosing to finish work requires a final activity entry covering the period since the previous record.
 - Prompts show the requested time range and how long they have been waiting. An unanswered prompt prevents later reminders from being created.
 - Enable or disable launch at Windows sign-in from the main window.
-- Entries are appended in chronological order to `activity_log.csv` in the selected folder. Reinstalling or restarting does not overwrite existing records.
+- Entries are appended in chronological order to monthly `activity_log_YYYY-MM.csv` files in the selected folder. Legacy `activity_log.csv` and all historical monthly files are preserved: reinstalling or upgrading never deletes or overwrites records.
 
 ### Safety
 
