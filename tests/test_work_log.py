@@ -41,26 +41,34 @@ def schedule_app(*, working: bool) -> tuple[reminder.HourlyReminder, list[dict[s
 
 
 class ScheduleWindowTests(unittest.TestCase):
-    def test_start_reminder_appears_only_in_half_hour_window(self) -> None:
+    def test_start_reminder_appears_only_at_scheduled_minute(self) -> None:
         app, calls = schedule_app(working=False)
-        app._check_work_schedule(datetime(2026, 9, 3, 8, 29))
+        app._check_work_schedule(datetime(2026, 9, 3, 8, 59, 59))
         self.assertEqual(calls, [])
 
-        app._check_work_schedule(datetime(2026, 9, 3, 8, 30))
+        app._check_work_schedule(datetime(2026, 9, 3, 9, 0, 20))
         self.assertEqual(calls, [{"is_start": True, "scheduled_time": "09:00"}])
 
     def test_start_reminder_does_not_appear_after_window(self) -> None:
         app, calls = schedule_app(working=False)
-        app._check_work_schedule(datetime(2026, 9, 3, 9, 31))
+        app._check_work_schedule(datetime(2026, 9, 3, 9, 1))
         self.assertEqual(calls, [])
 
-    def test_end_reminder_appears_only_in_half_hour_window(self) -> None:
+    def test_end_reminder_appears_only_at_scheduled_minute(self) -> None:
         app, calls = schedule_app(working=True)
-        app._check_work_schedule(datetime(2026, 9, 3, 17, 30))
+        app._check_work_schedule(datetime(2026, 9, 3, 17, 59, 59))
+        self.assertEqual(calls, [])
+
+        app._check_work_schedule(datetime(2026, 9, 3, 18, 0, 30))
         self.assertEqual(calls, [{"is_start": False, "scheduled_time": "18:00"}])
 
         app, calls = schedule_app(working=True)
-        app._check_work_schedule(datetime(2026, 9, 3, 18, 31))
+        app._check_work_schedule(datetime(2026, 9, 3, 18, 1))
+        self.assertEqual(calls, [])
+
+    def test_start_is_not_prompted_at_end_time(self) -> None:
+        app, calls = schedule_app(working=False)
+        app._check_work_schedule(datetime(2026, 9, 3, 18, 0, 10))
         self.assertEqual(calls, [])
 
 
@@ -84,6 +92,22 @@ class RecordSafetyTests(unittest.TestCase):
             self.assertEqual(legacy.read_text(encoding="utf-8"), "old-record-must-remain\n")
             with monthly.open(newline="", encoding="utf-8-sig") as file:
                 self.assertEqual(next(csv.reader(file)), ["记录周期开始", "提交时间", "这段时间做的事情"])
+            self.assertTrue(monthly.with_suffix(".csv.lock").exists())
+
+    def test_work_state_is_saved_in_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = root / "settings.json"
+            app = reminder.HourlyReminder.__new__(reminder.HourlyReminder)
+            app.working = True
+            app.period_started_at = datetime(2026, 9, 3, 9, 0)
+            app.next_due = datetime(2026, 9, 3, 10, 0)
+            with patch.object(reminder, "APP_DATA_DIR", root), patch.object(reminder, "SETTINGS_FILE", settings):
+                app._save_work_state()
+            stored = json.loads(settings.read_text(encoding="utf-8"))
+            self.assertTrue(stored["working"])
+            self.assertEqual(stored["period_started_at"], "2026-09-03T09:00:00")
+            self.assertEqual(stored["next_due"], "2026-09-03T10:00:00")
 
     def test_existing_settings_are_read_without_resetting_log_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

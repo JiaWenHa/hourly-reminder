@@ -12,7 +12,9 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import tkinter as tk
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,24 +25,56 @@ from holiday_calendar import is_china_legal_workday
 
 APP_NAME = "Work Log"
 DEFAULT_INTERVAL_SECONDS = 60 * 60
-SCHEDULE_REMINDER_WINDOW = timedelta(minutes=30)
+SCHEDULE_REMINDER_WINDOW = timedelta(minutes=1)
 # Keep the original directory so upgrading never loses existing records/settings.
 APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "HourlyReminder"
 SETTINGS_FILE = APP_DATA_DIR / "settings.json"
+_SETTINGS_LOCK = threading.RLock()
 
 
 def load_settings() -> dict[str, object]:
-    try:
-        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    with _SETTINGS_LOCK:
+        try:
+            return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
 
 
 def save_settings(settings: dict[str, object]) -> None:
-    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(
-        json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8",
-    )
+    with _SETTINGS_LOCK:
+        APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        temporary = SETTINGS_FILE.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+        temporary.replace(SETTINGS_FILE)
+
+
+@contextmanager
+def locked_log_file(log_file: Path):
+    """Serialize CSV creation/appends between multiple running instances."""
+    lock_file = log_file.with_suffix(log_file.suffix + ".lock")
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with lock_file.open("a+b") as lock:
+        lock.seek(0, os.SEEK_END)
+        if lock.tell() == 0:
+            lock.write(b"\0")
+            lock.flush()
+        lock.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            lock.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def get_log_directory() -> Path:
@@ -72,10 +106,14 @@ class HourlyReminder:
         self.root = root
         self.interval_seconds = interval_seconds
         self.prompt: Prompt | None = None
-        self.working = False
-        self.next_due: datetime | None = None
-        self.period_started_at: datetime | None = None
         settings = load_settings()
+        self.working = bool(settings.get("working", False))
+        self.next_due = self._stored_datetime(settings.get("next_due"))
+        self.period_started_at = self._stored_datetime(settings.get("period_started_at"))
+        if self.working and self.period_started_at is None:
+            self.period_started_at = datetime.now()
+        if self.working and self.next_due is None:
+            self.next_due = self.period_started_at + timedelta(seconds=self.interval_seconds)
         start_hour, start_minute = self._split_time(settings.get("start_time", "09:00"), "09:00")
         end_hour, end_minute = self._split_time(settings.get("end_time", "18:00"), "18:00")
         self.start_hour_var = tk.StringVar(value=start_hour)
@@ -96,7 +134,9 @@ class HourlyReminder:
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
         self._build_main_window()
+        self._sync_work_buttons()
         self._ensure_log_file()
+        self._refresh_holiday_calendar_async()
         self._tick()
 
     def _build_main_window(self) -> None:
@@ -177,6 +217,60 @@ class HourlyReminder:
             parsed = datetime.strptime(fallback, "%H:%M").time()
         return f"{parsed.hour:02d}", f"{parsed.minute:02d}"
 
+    @staticmethod
+    def _stored_datetime(value: object) -> datetime | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+
+    def _save_work_state(self) -> None:
+        settings = load_settings()
+        settings["working"] = self.working
+        settings["period_started_at"] = (
+            self.period_started_at.isoformat(timespec="seconds") if self.period_started_at else None
+        )
+        settings["next_due"] = self.next_due.isoformat(timespec="seconds") if self.next_due else None
+        save_settings(settings)
+
+    def _sync_work_buttons(self) -> None:
+        self.start_button.config(state="disabled" if self.working else "normal")
+        self.stop_button.config(state="normal" if self.working else "disabled")
+        self.manual_button.config(state="normal" if self.working else "disabled")
+
+    def _refresh_holiday_calendar_async(self) -> None:
+        """Fetch missing current/next-year calendars without blocking the UI."""
+        years = (datetime.now().year, datetime.now().year + 1)
+        if all(isinstance(self.holiday_calendar.get(str(year)), dict) for year in years):
+            return
+
+        def refresh() -> None:
+            from holiday_calendar import download_china_holiday_year
+            downloaded: dict[str, dict[str, bool]] = {}
+            for year in years:
+                if not isinstance(self.holiday_calendar.get(str(year)), dict):
+                    try:
+                        downloaded[str(year)] = download_china_holiday_year(year)
+                    except (OSError, ValueError):
+                        continue
+            if downloaded:
+                self.root.after(0, lambda: self._apply_holiday_refresh(downloaded))
+
+        threading.Thread(target=refresh, name="holiday-calendar-refresh", daemon=True).start()
+
+    def _apply_holiday_refresh(self, downloaded: dict[str, dict[str, bool]]) -> None:
+        self.holiday_calendar.update(downloaded)
+        settings = load_settings()
+        existing = settings.get("holiday_calendar")
+        calendar = dict(existing) if isinstance(existing, dict) else {}
+        calendar.update(downloaded)
+        settings["holiday_calendar"] = calendar
+        settings["holiday_calendar_region"] = "CN"
+        settings["holiday_calendar_updated_at"] = datetime.now().isoformat(timespec="seconds")
+        save_settings(settings)
+
     def _selected_time(self, hour: tk.StringVar, minute: tk.StringVar) -> str:
         return f"{hour.get()}:{minute.get()}"
 
@@ -232,14 +326,10 @@ class HourlyReminder:
         scheduled_end = now.replace(
             hour=end.hour, minute=end.minute, second=0, microsecond=0,
         )
-        in_start_window = (
-            scheduled_start - SCHEDULE_REMINDER_WINDOW <= now
-            <= scheduled_start + SCHEDULE_REMINDER_WINDOW
-        )
-        in_end_window = (
-            scheduled_end - SCHEDULE_REMINDER_WINDOW <= now
-            <= scheduled_end + SCHEDULE_REMINDER_WINDOW
-        )
+        # Fire only during the scheduled minute: never early and never at the
+        # other end of the workday.
+        in_start_window = scheduled_start <= now < scheduled_start + SCHEDULE_REMINDER_WINDOW
+        in_end_window = scheduled_end <= now < scheduled_end + SCHEDULE_REMINDER_WINDOW
         if not self.working and in_start_window and self.start_prompted_date != today:
             self.start_prompted_date = today
             self._show_schedule_decision(is_start=True, scheduled_time=start_text)
@@ -306,9 +396,8 @@ class HourlyReminder:
         self.working = True
         self.period_started_at = datetime.now()
         self.next_due = self.period_started_at + timedelta(seconds=self.interval_seconds)
-        self.start_button.config(state="disabled")
-        self.stop_button.config(state="normal")
-        self.manual_button.config(state="normal")
+        self._sync_work_buttons()
+        self._save_work_state()
 
     def _stop_work(self) -> None:
         if self.prompt is not None:
@@ -428,12 +517,14 @@ class HourlyReminder:
         log_file = get_log_file(now)
         try:
             self._ensure_log_file(log_file)
-            with log_file.open("a", newline="", encoding="utf-8-sig") as file:
-                csv.writer(file).writerow([
-                    self.prompt.period_started_at.isoformat(timespec="seconds"),
-                    now.isoformat(timespec="seconds"),
-                    activity,
-                ])
+            with locked_log_file(log_file):
+                self._ensure_log_file_unlocked(log_file)
+                with log_file.open("a", newline="", encoding="utf-8-sig") as file:
+                    csv.writer(file).writerow([
+                        self.prompt.period_started_at.isoformat(timespec="seconds"),
+                        now.isoformat(timespec="seconds"),
+                        activity,
+                    ])
         except OSError as error:
             messagebox.showerror(APP_NAME, f"无法写入记录文件：\n{error}", parent=self.prompt.window)
             return
@@ -444,18 +535,23 @@ class HourlyReminder:
             self.working = False
             self.next_due = None
             self.period_started_at = None
-            self.start_button.config(state="normal")
-            self.stop_button.config(state="disabled")
-            self.manual_button.config(state="disabled")
+            self._sync_work_buttons()
+            self._save_work_state()
             self.status.config(text="下班记录已保存，提醒已暂停。")
         elif self.working:
             self.period_started_at = now
             self.next_due = now + timedelta(seconds=self.interval_seconds)
+            self._save_work_state()
             self.status.config(text="已保存，下一小时后再提醒。")
 
     def _ensure_log_file(self, log_file: Path | None = None) -> None:
         """Create only a missing monthly file; existing history is immutable."""
         target = log_file or get_log_file()
+        with locked_log_file(target):
+            self._ensure_log_file_unlocked(target)
+
+    @staticmethod
+    def _ensure_log_file_unlocked(target: Path) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists():
             with target.open("w", newline="", encoding="utf-8-sig") as file:
